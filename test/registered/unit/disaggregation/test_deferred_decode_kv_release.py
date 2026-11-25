@@ -1246,6 +1246,43 @@ class TestUpdateStatusOpeningRace(CustomTestCase):
         self.assertEqual(mgr.request_status[room], KVPoll.WaitingForInput)
 
 
+class TestClearDoesNotRaceUpdateStatus(CustomTestCase):
+    def test_trailing_status_write_cannot_resurrect_a_cleared_room(self):
+        room = 4243
+        mgr = _make_prefill_manager()
+        mgr._status_lock = _ContentionSignalingLock()
+        mgr.request_status = _ReadPausingStatusMap("worker")
+        mgr.request_status[room] = KVPoll.Transferring
+        sender = _TestSender.__new__(_TestSender)
+        sender.kv_mgr = mgr
+        sender.bootstrap_room = room
+        sender.conclude_state = KVPoll.Success
+        worker = threading.Thread(
+            name="worker",
+            target=CommonKVManager.update_status,
+            args=(mgr, room, KVPoll.Transferring),
+        )
+        scheduler = threading.Thread(name="scheduler", target=sender.clear)
+
+        worker.start()
+        self.assertTrue(mgr.request_status.paused.wait(timeout=10))
+        scheduler.start()
+        deadline = time.monotonic() + 10
+        while (
+            scheduler.is_alive()
+            and not mgr._status_lock.contended.is_set()
+            and time.monotonic() < deadline
+        ):
+            scheduler.join(timeout=0.01)
+        mgr.request_status.resume.set()
+        worker.join(timeout=10)
+        scheduler.join(timeout=10)
+
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(scheduler.is_alive())
+        self.assertNotIn(room, mgr.request_status)
+
+
 class TestBackendOptIn(CustomTestCase):
     """Without a prefill ack, every hold waits out the full release timeout."""
 
